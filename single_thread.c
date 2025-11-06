@@ -82,13 +82,27 @@ int main(int argc, char * argv[]) {
     #endif
 
     hilo_func(NULL);
-
     #ifdef DEBUG
     gettimeofday(&end, NULL);
     double tiempo = (end.tv_sec - start.tv_sec) +
                 (end.tv_usec - start.tv_usec) / 1e6;
+    #endif
+    /*
+        IMPRIMIR RESULTADOS
+    */
+    for(i = 0; i < matriz.nfil; i++){
+        for(id = 0; id < matriz.ncol; id++){
+            printf("%f ", matriz.actual[i][id]);
+        }
+        printf("\n");
+    }
+    
+    #ifdef DEBUG
+    printf("Iteraciones temporales: %ld\n", iteraciones_temporales);
     printf("Tiempo de ejecucion (seg): %.6f\n", tiempo);
     #endif
+
+
     /*
         LIBERACIÓN DE RECURSOS
     */
@@ -139,19 +153,6 @@ void* hilo_func(void *info) {
         #endif
 
         if (dt < ESTACIONARIO) {
-            /*
-                IMPRIMIR RESULTADOS
-            */
-            for(i = 0; i < matriz.nfil; i++){
-                for(j = 0; j < matriz.ncol; j++){
-                    printf("%f ", matriz.actual[i][j]);
-                }
-                printf("\n");
-            }
-            #ifdef DEBUG
-                printf("Iteraciones temporales: %ld\n", iteraciones_temporales);
-            #endif
-
             return NULL;
         }
         
