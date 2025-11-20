@@ -157,15 +157,14 @@ void* hilo_func(void *info) {
         
         status.iteraciones_temporales++;
     
+        if (dt < ESTACIONARIO) {
+            return NULL;
+        }
         // intercambiar punteros de matrices 
         aux = matriz.actual;
         matriz.actual = matriz.anterior;
         matriz.anterior = aux;
 
-        if (dt < ESTACIONARIO) {
-            return NULL;
-        }
-        
         dt = 0;
     }
 }

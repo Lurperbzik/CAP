@@ -230,11 +230,7 @@ void* hilo_func(void *info) {
         pthread_mutex_lock(&barrier.mutex);
         barrier.cont++;
         if(barrier.cont == nhilos){
-            // intercambiar punteros de matrices 
-            aux = matriz.actual;
-            matriz.actual = matriz.anterior;
-            matriz.anterior = aux;
-            
+        
             status.iteraciones_temporales++;
 
             /*
@@ -246,6 +242,11 @@ void* hilo_func(void *info) {
                 pthread_mutex_unlock(&barrier.mutex); 
                 return NULL;
             }
+            // intercambiar punteros de matrices 
+            aux = matriz.actual;
+            matriz.actual = matriz.anterior;
+            matriz.anterior = aux;
+            
             barrier.cont = 0;
             dt = 0;
             pthread_cond_broadcast(&barrier.cond);
