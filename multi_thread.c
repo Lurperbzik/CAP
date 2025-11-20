@@ -2,14 +2,12 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <sys/time.h>
 
 #define R 0.1
 #define ESTACIONARIO 1e-6
+#define LOG_FILE "resultados.csv"
 
-#ifdef DEBUG
-#include <sys/time.h>
-long iteraciones_temporales=0;
-#endif
 
 void* hilo_func(void *);
 
@@ -32,6 +30,12 @@ unsigned short int nhilos;
 float dt = 0;
 char fin_programa = -1;
 
+struct Status {
+    double tiempo;
+    long iteraciones_temporales;
+};
+struct Status status = {0};
+
 int main(int argc, char * argv[]) {
     /*
         VARIABLES LOCALES
@@ -40,20 +44,20 @@ int main(int argc, char * argv[]) {
     int i;
     long id;
     pthread_t *thread_handles;
-    #ifdef DEBUG
     struct timeval start, end;
-    #endif
+    FILE *f;
+
 
     /*
         LECTURA DE ARGUMENTOS
     */
     if (argc < 4) {
         printf("Error de uso: %s [nfil] [ncol] [nhilos]\n", argv[0]);
-        return 2;
+        return 1;
     }
 
-    matriz.nfil = atoi(argv[1]);
-    matriz.ncol = atoi(argv[2]);
+    matriz.nfil = (unsigned int)atoi(argv[1]);
+    matriz.ncol = (unsigned int)atoi(argv[2]);
     nhilos = atoi(argv[3]);
 
     if(matriz.nfil < 1 || matriz.ncol < 1 || nhilos < 1){
@@ -101,9 +105,7 @@ int main(int argc, char * argv[]) {
 
     thread_handles = malloc(nhilos*sizeof(pthread_t));
 
-    #ifdef DEBUG
     gettimeofday(&start, NULL);
-    #endif
 
     for (id = 0; id < nhilos; id++){
         if(pthread_create(&thread_handles[id], NULL, hilo_func, (void*)id)){
@@ -114,25 +116,22 @@ int main(int argc, char * argv[]) {
     for (i = 0; i < nhilos; i++){
        pthread_join(thread_handles[i], NULL);
     }
-    #ifdef DEBUG
+   
     gettimeofday(&end, NULL);
-    double tiempo = (end.tv_sec - start.tv_sec) +
+    status.tiempo = (end.tv_sec - start.tv_sec) +
             (end.tv_usec - start.tv_usec) / 1e6;
-    #endif
+ 
 
     /*
         IMPRIMIR RESULTADOS
     */
-    for(i = 0; i < matriz.nfil; i++){
-        for(id = 0; id < matriz.ncol; id++){
-            printf("%f ", matriz.actual[i][id]);
-        }
-        printf("\n");
-    }
-    
     #ifdef DEBUG
-    printf("Iteraciones temporales: %ld\n", iteraciones_temporales);
-    printf("Tiempo de ejecucion (seg): %.6f\n", tiempo);
+        for(i = 0; i < matriz.nfil; i++){
+            for(id = 0; id < matriz.ncol; id++){
+                printf("%f ", matriz.actual[i][id]);
+            }
+            printf("\n");
+        }
     #endif
 
 
@@ -148,6 +147,18 @@ int main(int argc, char * argv[]) {
     free(datos_anterior);
     free(matriz.actual);
     free(matriz.anterior);
+
+    /*
+        Almacenar resultados en un fichero
+    */
+    f = fopen(LOG_FILE, "a");  
+    if (!f) {
+        perror("fopen");
+        return 3;
+    }
+    fprintf(f, "%hu,%u,%u,%f,%ld\n", nhilos, matriz.nfil, matriz.ncol, status.tiempo, status.iteraciones_temporales);
+
+    fclose(f);
     return 0;
    
 }
@@ -167,6 +178,10 @@ void* hilo_func(void *info) {
         float arriba, abajo, izquierda, derecha;
     };
     struct Temperatura t;
+
+    /*
+        ASIGNACIÓN DE TAREAS A CADA HILO
+    */
 
     if (matriz.nfil % nhilos != 0){
         if (id < matriz.nfil%nhilos){
@@ -220,9 +235,7 @@ void* hilo_func(void *info) {
             matriz.actual = matriz.anterior;
             matriz.anterior = aux;
             
-            #ifdef DEBUG
-                iteraciones_temporales++;
-            #endif
+            status.iteraciones_temporales++;
 
             /*
                 COMPRUEBA SI HAY ESTADO DE TEMPERATURA ESTACIONARIO

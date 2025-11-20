@@ -1,14 +1,10 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
 
 #define R 0.1
 #define ESTACIONARIO 1e-6
-
-#ifdef DEBUG
-#include <sys/time.h>
-long iteraciones_temporales=0;
-#endif
-
+#define LOG_FILE "resultados.csv"
 
 void* hilo_func(void *);
 
@@ -21,6 +17,12 @@ struct Matriz matriz = {0};
 
 float dt = 0;
 
+struct Status {
+    double tiempo;
+    long iteraciones_temporales;
+};
+struct Status status = {0};
+
 int main(int argc, char * argv[]) {
     /*
         VARIABLES LOCALES
@@ -28,20 +30,20 @@ int main(int argc, char * argv[]) {
     float *datos_actual, *datos_anterior;
     int i;
     long id;
-    #ifdef DEBUG
     struct timeval start, end;
-    #endif
+    FILE *f;
+    
 
     /*
         LECTURA DE ARGUMENTOS
     */
     if (argc < 3) {
         printf("Error de uso: %s [nfil] [ncol]\n", argv[0]);
-        return 2;
+        return 1;
     }
 
-    matriz.nfil = atoi(argv[1]);
-    matriz.ncol = atoi(argv[2]);
+    matriz.nfil = (unsigned int)atoi(argv[1]);
+    matriz.ncol = (unsigned int)atoi(argv[2]);
   
     if(matriz.nfil < 1 || matriz.ncol < 1){
         printf("Error de uso: nfil y ncol deben ser mayor que 0\n", argv[0]);
@@ -77,31 +79,25 @@ int main(int argc, char * argv[]) {
     /*
         EJECUCIÓN 
     */
-    #ifdef DEBUG
     gettimeofday(&start, NULL);
-    #endif
+    
 
     hilo_func(NULL);
-    #ifdef DEBUG
     gettimeofday(&end, NULL);
-    double tiempo = (end.tv_sec - start.tv_sec) +
+    status.tiempo = (end.tv_sec - start.tv_sec) +
                 (end.tv_usec - start.tv_usec) / 1e6;
-    #endif
+
     /*
         IMPRIMIR RESULTADOS
     */
-    for(i = 0; i < matriz.nfil; i++){
-        for(id = 0; id < matriz.ncol; id++){
-            printf("%f ", matriz.actual[i][id]);
-        }
-        printf("\n");
-    }
-    
     #ifdef DEBUG
-    printf("Iteraciones temporales: %ld\n", iteraciones_temporales);
-    printf("Tiempo de ejecucion (seg): %.6f\n", tiempo);
+        for(i = 0; i < matriz.nfil; i++){
+            for(id = 0; id < matriz.ncol; id++){
+                printf("%f ", matriz.actual[i][id]);
+            }
+            printf("\n");
+        }
     #endif
-
 
     /*
         LIBERACIÓN DE RECURSOS
@@ -110,8 +106,19 @@ int main(int argc, char * argv[]) {
     free(datos_anterior);
     free(matriz.actual);
     free(matriz.anterior);
+
+    /*
+        Almacenar resultados en un fichero
+    */
+    f = fopen(LOG_FILE, "a");  
+    if (!f) {
+        perror("fopen");
+        return 3;
+    }
+    fprintf(f, "%d,%u,%u,%f,%ld\n", 1, matriz.nfil, matriz.ncol, status.tiempo, status.iteraciones_temporales);
+
+    fclose(f);
     return 0;
-   
 }
 
 
@@ -148,10 +155,8 @@ void* hilo_func(void *info) {
             }
         } 
         
-        #ifdef DEBUG
-            iteraciones_temporales++;
-        #endif
-
+        status.iteraciones_temporales++;
+    
         // intercambiar punteros de matrices 
         aux = matriz.actual;
         matriz.actual = matriz.anterior;
