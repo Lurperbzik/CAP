@@ -160,7 +160,7 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
                     t.arriba = matriz.anterior[i][j] - matriz.anterior[i-1][j];
                 } 
                 if (i == matriz.nfil - 1){
-                    t.abajo = id != matriz.nfil - 1 ? matriz.anterior[i][j] - fila_inferior[j] : 0;
+                    t.abajo = id != nprocs - 1 ? matriz.anterior[i][j] - fila_inferior[j] : 0;
                 } else {
                     t.abajo = matriz.anterior[i][j] - matriz.anterior[i+1][j];
                 } 
