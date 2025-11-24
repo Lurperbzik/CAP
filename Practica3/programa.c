@@ -64,7 +64,7 @@ int main(int argc, char **argv){
         matriz.anterior[i] = datos_anterior + i * matriz.ncol;
     }
 
-    recv_buf = calloc(matriz.ncol * 2, sizeof(float));
+    recv_buf = malloc(matriz.ncol * 2 * sizeof(float));
     
     /* 
         INICIALIZACIÓN DE TEMPERATURAS
@@ -99,8 +99,8 @@ int main(int argc, char **argv){
         }
         printf("\n");
     }
+    printf("Iteraciones : %d\n", iteraciones);
 
-    printf("ITERACIONES : %d\n", iteraciones);
     /*
         FIN
     */
@@ -129,7 +129,7 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
         local_dt = 0;
         iteraciones++;
         /*
-            ENVIO Y RECEPCION DE/A VECINOS
+            RECEPCION Y ENVIO DE/A VECINOS
         */
         MPI_Neighbor_alltoallw(
             matriz.anterior[0], send_recv_count, send_despl, send_recv_type,
@@ -143,17 +143,6 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
         for(i = 0; i < matriz.nfil; i++){
             for(j = 0; j < matriz.ncol; j++){
                 
-                /*
-                    [0, 20, 20, 20]         -> PROC 0
-                    [20, 20, 20, 20]
-                    [20, 20, 20, 20]        -> PROC 1
-                    [20, 20, 20, 20]
-                    [20, 20, 20, 20]        -> PROC 2
-                    [20, 20, 20, 20]
-                    [20, 20, 20, 20]        -> PROC 3
-                    [20, 20, 20, 100]
-                */
-
                 if (i == 0){
                     t.arriba = id != 0 ? matriz.anterior[i][j] - fila_superior[j] : 0;
                 } else{
