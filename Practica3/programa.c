@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
 #include <mpi.h>
 
 // MPI_Gatherv para recibir
@@ -13,8 +14,12 @@ struct Matriz {
     float **actual;
     float **anterior;
 };
-int iteraciones = 0;
 void computar(struct Matriz, MPI_Comm, float *, int, int, MPI_Datatype);
+struct Status {
+    double tiempo;
+    long iteraciones_temporales;
+};
+struct Status status = {0};
 
 int main(int argc, char **argv){
     int id, nprocs;
@@ -26,6 +31,7 @@ int main(int argc, char **argv){
     float *datos_actual, *datos_anterior, *datos_completa;
     float *recv_buf;
     int i, j;
+    struct timeval start, end;
     FILE *f;
     // DATOS PARA SCATTERV / GATHERV
     int *contadores_env; // vector con el número de elementos por proceso
@@ -118,10 +124,15 @@ int main(int argc, char **argv){
         matriz.actual[i] = datos_actual + i * matriz.ncol;
         matriz.anterior[i] = datos_anterior + i * matriz.ncol;
     }
-    
-   /* 
+    /*
+        REGISTRAR TIEMPO DE INICIO
+    */
+    if(id == 0){
+        gettimeofday(&start, NULL);
+    }
+    /* 
         ENVÍO DE TAREAS 
-   */
+    */
     MPI_Type_contiguous(col_completas, MPI_FLOAT, &rowtype);
     MPI_Type_commit(&rowtype);
 
@@ -167,30 +178,51 @@ int main(int argc, char **argv){
         0,
         MPI_COMM_WORLD
     );
-    
+    /*
+        REGISTRAR TIEMPO DE FIN
+    */
     if(id == 0){
-        for(i = 0; i < fil_completas; i++){
-            for(j = 0; j < col_completas; j++){
-                printf("%f ", matriz_completa[i][j]);
-            }
-            printf("\n");
-        }
-        printf("Iteraciones : %d\n", iteraciones);
+        gettimeofday(&end, NULL);
+        status.tiempo = (end.tv_sec - start.tv_sec) +
+            (end.tv_usec - start.tv_usec) / 1e6;
     }
+    
+    #ifdef DEBUG
+        if(id == 0){
+            for(i = 0; i < fil_completas; i++){
+                for(j = 0; j < col_completas; j++){
+                    printf("%f ", matriz_completa[i][j]);
+                }
+                printf("\n");
+            }
+            printf("Iteraciones : %d\n", status.iteraciones_temporales);
+        }
+    #endif
 
     /*
         LIBERAR RECURSOS
     */  
-    free(matriz.actual);
-    free(matriz.anterior);
     free(datos_actual);
     free(datos_anterior);
+    free(matriz.actual);
+    free(matriz.anterior);
     free(recv_buf);
     if (id == 0){
         free(matriz_completa);
         free(datos_completa);
     }
-    
+    /*
+        ALMACENAR LOS DATOS EN UN FICHERO
+    */
+    if(id == 0){
+        f = fopen(LOG_FILE, "a");  
+        if (!f) {
+            perror("fopen");
+            return 3;
+        }
+        fprintf(f, "%hu,%u,%u,%f,%ld\n", nprocs, fil_completas, col_completas, status.tiempo, status.iteraciones_temporales);
+        fclose(f);
+   }
     /*
         FIN
     */
@@ -218,7 +250,7 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
     
     while(1){
         local_dt = 0;
-        iteraciones++;
+        status.iteraciones_temporales++;
         /*
             RECEPCION Y ENVIO DE/A VECINOS
         */
