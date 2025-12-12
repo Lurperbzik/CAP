@@ -3,41 +3,50 @@
 #include <sys/time.h>
 #include <mpi.h>
 
-// MPI_Gatherv para recibir
-// MPI_Scatterv para enviar
-
 #define R 0.1
 #define ESTACIONARIO 1e-6
 #define LOG_FILE "resultados.csv"
-struct Matriz {
+
+struct MatrizLocal {
     unsigned int nfil, ncol;
-    float **actual;
-    float **anterior;
+    float **matriz_actual;
+    float **matriz_anterior;
+    float *datos_actual;
+    float *datos_anterior; 
 };
-void computar(struct Matriz, MPI_Comm, float *, int, int, MPI_Datatype);
+struct MatrizGlobal {
+    unsigned int nfil, ncol;
+    float **matriz;
+    float *datos;
+};
+struct Topologia {
+    int dims[1];
+    int periods[1];
+};
+struct Tareas {
+    int *contadores_env;
+    int *despls;
+    MPI_Datatype tipo_fila;
+};
 struct Status {
     double tiempo;
     long iteraciones_temporales;
 };
+
+void computar(struct MatrizLocal, MPI_Comm, float *, int, int, MPI_Datatype);
 struct Status status = {0};
 
+
 int main(int argc, char **argv){
-    int id, nprocs;
-    int dims[1];                // tamaño de la malla 1D
-    int periods[1] = {0};       // sin periodicidad
-    struct Matriz matriz = {0};
-    float **matriz_completa;
-    unsigned int fil_completas, col_completas;
-    float *datos_actual, *datos_anterior, *datos_completa;
-    float *recv_buf;
-    int i, j;
+    int id, nprocs, i, j;
+    struct Topologia topologia;
+    struct Tareas send_root;
+    struct MatrizGlobal global;
+    struct MatrizLocal local = {0};
     struct timeval start, end;
+    float *recv_buf;
     FILE *f;
-    // DATOS PARA SCATTERV / GATHERV
-    int *contadores_env; // vector con el número de elementos por proceso
-    int *despls; // Desplazamientos
-    int contador_desp = 0;
-    MPI_Datatype rowtype;
+    
     /*
         LECTURA DE ARGUMENTOS
     */
@@ -45,18 +54,19 @@ int main(int argc, char **argv){
         printf("Error de uso: %s [nfil] [ncol]\n", argv[0]);
         return 1;
     }    
-    fil_completas = (unsigned int)atoi(argv[1]);
-    col_completas = (unsigned int)atoi(argv[2]);
+    global.nfil = (unsigned int)atoi(argv[1]);
+    global.ncol = (unsigned int)atoi(argv[2]);
 
-    if(fil_completas < 1 || col_completas < 1){
+    if(global.nfil < 1 || global.ncol < 1){
         printf("Error de uso: nfil y ncol deben ser mayor que 0\n");
         return 2;
     }
-    matriz.ncol = col_completas;
 
     /*
         INICIALIZACIÓN DE MPI
     */
+    gettimeofday(&start, NULL);
+
     MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
@@ -68,38 +78,37 @@ int main(int argc, char **argv){
         /*
             RESERVA DE MEMORIA 
         */
-        matriz_completa = (float **)malloc(sizeof(float *) * (fil_completas));
-        datos_completa = malloc(sizeof(float) * (fil_completas) * col_completas);
-        for(i = 0; i < fil_completas; i++){
-            matriz_completa[i] = datos_completa + i * col_completas;
+        global.matriz = (float **)malloc(sizeof(float *) * (global.nfil));
+        global.datos = malloc(sizeof(float) * (global.nfil) * global.ncol);
+        for(i = 0; i < global.nfil; i++){
+            global.matriz[i] = global.datos + i * global.ncol;
         }
 
         /* 
             INICIALIZACIÓN DE TEMPERATURAS
         */
-        for(i = 0; i < fil_completas; i++){
-            for(j = 0; j < col_completas; j++){
-               matriz_completa[i][j] = 20;
+        for(i = 0; i < global.nfil; i++){
+            for(j = 0; j < global.ncol; j++){
+               global.matriz[i][j] = 20;
             }
         }
-        
-        matriz_completa[0][0] = 0;
-        matriz_completa[fil_completas-1][col_completas-1] = 100;   
+        global.matriz[0][0] = 0;
+        global.matriz[global.nfil-1][global.ncol-1] = 100;   
 
         /*
             DATOS DE SCATTERV
         */
-        contadores_env = malloc(sizeof(int) * nprocs);
-        despls = malloc(sizeof(int) * nprocs);
+        send_root.contadores_env = malloc(sizeof(int) * nprocs);
+        send_root.despls = malloc(sizeof(int) * nprocs);
 
         for(i = 0; i < nprocs; i++){
-            contadores_env[i] = (i < fil_completas % nprocs)
-                ? fil_completas / nprocs + 1 
-                : fil_completas / nprocs;
+            send_root.contadores_env[i] = (i < global.nfil % nprocs)
+                ? global.nfil / nprocs + 1 
+                : global.nfil / nprocs;
             
-            despls[i] = (i == 0) 
+            send_root.despls[i] = (i == 0) 
                 ? 0 :
-                despls[i-1] + contadores_env[i-1];
+                send_root.despls[i-1] + send_root.contadores_env[i-1];
         }
     }
       
@@ -107,74 +116,81 @@ int main(int argc, char **argv){
     /*
         ASIGNACIÓN DE TAREAS A CADA PROCESO
     */
-    matriz.nfil = (id < fil_completas % nprocs)
-        ? fil_completas / nprocs + 1 
-        : fil_completas / nprocs;
+    local.nfil = (id < global.nfil % nprocs)
+        ? global.nfil / nprocs + 1 
+        : global.nfil / nprocs;
+    local.ncol = global.ncol;
 
     /*
         RESERVA DE MEMORIA PARA MATRICES LOCALES
     */
-    matriz.actual = (float **)malloc(sizeof(float *) * (matriz.nfil));
-    datos_actual = malloc(sizeof(float) * (matriz.nfil) * matriz.ncol);
+    local.matriz_actual = (float **)malloc(sizeof(float *) * (local.nfil));
+    local.datos_actual = malloc(sizeof(float) * (local.nfil) * local.ncol);
 
-    matriz.anterior = (float **)malloc(sizeof(float *) * (matriz.nfil));
-    datos_anterior = malloc(sizeof(float) * (matriz.nfil) * matriz.ncol);
+    local.matriz_anterior = (float **)malloc(sizeof(float *) * (local.nfil));
+    local.datos_anterior = malloc(sizeof(float) * (local.nfil) * local.ncol);
 
-    for(i = 0; i < matriz.nfil; i++){
-        matriz.actual[i] = datos_actual + i * matriz.ncol;
-        matriz.anterior[i] = datos_anterior + i * matriz.ncol;
+    for(i = 0; i < local.nfil; i++){
+        local.matriz_actual[i] = local.datos_actual + i * local.ncol;
+        local.matriz_anterior[i] = local.datos_anterior + i * local.ncol;
     }
     /*
         REGISTRAR TIEMPO DE INICIO
     */
-    if(id == 0){
-        gettimeofday(&start, NULL);
-    }
+ 
     /* 
         ENVÍO DE TAREAS 
     */
-    MPI_Type_contiguous(col_completas, MPI_FLOAT, &rowtype);
-    MPI_Type_commit(&rowtype);
+    MPI_Type_contiguous(global.ncol, MPI_FLOAT, &send_root.tipo_fila);
+    MPI_Type_commit(&send_root.tipo_fila);
 
     MPI_Scatterv(
-        id == 0 ? datos_completa  : NULL,
-        id == 0 ? contadores_env  : NULL,
-        id == 0 ? despls          : NULL,
-        id == 0 ? rowtype         : MPI_DATATYPE_NULL,
-        datos_anterior,
-        matriz.nfil,
-        rowtype,
+        id == 0 ? global.datos  : NULL,
+        id == 0 ? send_root.contadores_env  : NULL,
+        id == 0 ? send_root.despls          : NULL,
+        id == 0 ? send_root.tipo_fila       : MPI_DATATYPE_NULL,
+        local.datos_anterior,
+        local.nfil,
+        send_root.tipo_fila,
         0,
         MPI_COMM_WORLD
     );
 
     /* RESERVA DE MEMORIA PARA BÚFERES DE RECEPCIÓN */
-    recv_buf = malloc(matriz.ncol * 2 * sizeof(float));
+    recv_buf = malloc(local.ncol * 2 * sizeof(float));
     
     /* 
         CREACIÓN TOPOLOGÍA CARTESIANA 1D -> TOPOLOGÍA DE VECINOS
     */
-    dims[0] = nprocs;
+    topologia.dims[0] = nprocs;
+    topologia.periods[0] = 0;
     MPI_Comm comm1D;
-    MPI_Cart_create(MPI_COMM_WORLD, 1, dims, periods, 0, &comm1D);
+    MPI_Cart_create(
+        MPI_COMM_WORLD, 
+        1, 
+        topologia.dims, 
+        topologia.periods, 
+        0, 
+        &comm1D
+    );
 
     /*
         CÁLCULOS
     */
-    computar(matriz, comm1D, recv_buf, id, nprocs, rowtype);
+    computar(local, comm1D, recv_buf, id, nprocs, send_root.tipo_fila);
 
     /*
         RECEPCIÓN DE DATOS EN PROCESO RAÍZ
     */
 
     MPI_Gatherv(
-        datos_actual,
-        matriz.nfil, 
-        rowtype,
-        id == 0 ? datos_completa : NULL,
-        id == 0 ? contadores_env : NULL,
-        id == 0 ? despls : NULL,
-        id == 0 ? rowtype : MPI_DATATYPE_NULL,
+        local.datos_actual,
+        local.nfil, 
+        send_root.tipo_fila,
+        id == 0 ? global.datos : NULL,
+        id == 0 ? send_root.contadores_env : NULL,
+        id == 0 ? send_root.despls : NULL,
+        id == 0 ? send_root.tipo_fila : MPI_DATATYPE_NULL,
         0,
         MPI_COMM_WORLD
     );
@@ -189,9 +205,9 @@ int main(int argc, char **argv){
     
     #ifdef DEBUG
         if(id == 0){
-            for(i = 0; i < fil_completas; i++){
-                for(j = 0; j < col_completas; j++){
-                    printf("%f ", matriz_completa[i][j]);
+            for(i = 0; i < global.nfil; i++){
+                for(j = 0; j < global.ncol; j++){
+                    printf("%f ", global.matriz[i][j]);
                 }
                 printf("\n");
             }
@@ -202,14 +218,14 @@ int main(int argc, char **argv){
     /*
         LIBERAR RECURSOS
     */  
-    free(datos_actual);
-    free(datos_anterior);
-    free(matriz.actual);
-    free(matriz.anterior);
+    free(local.datos_actual);
+    free(local.datos_anterior);
+    free(local.matriz_actual);
+    free(local.matriz_anterior);
     free(recv_buf);
     if (id == 0){
-        free(matriz_completa);
-        free(datos_completa);
+        free(global.matriz);
+        free(global.datos);
     }
     /*
         ALMACENAR LOS DATOS EN UN FICHERO
@@ -220,7 +236,7 @@ int main(int argc, char **argv){
             perror("fopen");
             return 3;
         }
-        fprintf(f, "%hu,%u,%u,%f,%ld\n", nprocs, fil_completas, col_completas, status.tiempo, status.iteraciones_temporales);
+        fprintf(f, "%hu,%u,%u,%f,%ld\n", nprocs, global.nfil, global.ncol, status.tiempo, status.iteraciones_temporales);
         fclose(f);
    }
     /*
@@ -231,7 +247,7 @@ int main(int argc, char **argv){
 }
 
 
-void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, int nprocs, MPI_Datatype rowtype){
+void computar(struct MatrizLocal local, MPI_Comm comm1D, float *recv_buf, int id, int nprocs, MPI_Datatype tipo_fila){
     int i, j;
     float **temp;
     struct Temperatura {
@@ -241,12 +257,11 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
     float local_dt, global_dt;
 
     int send_recv_count[2] = {1, 1};     // tamaño del búfer de mensajes
-    MPI_Datatype send_recv_type[2] = {rowtype, rowtype}; // tipos del búfer de mensajes
-     // desplazamientos locales
-    size_t send_despl[2] = {0, sizeof(float) * matriz.ncol * (matriz.nfil - 1)};
-    size_t recv_despl[2] = {0, sizeof(float) * matriz.ncol}; 
+    MPI_Datatype send_recv_type[2] = {tipo_fila, tipo_fila}; // tipos del búfer de mensajes
+    size_t send_despl[2] = {0, sizeof(float) * local.ncol * (local.nfil - 1)};
+    size_t recv_despl[2] = {0, sizeof(float) * local.ncol}; 
     float *fila_superior = recv_buf;
-    float *fila_inferior = recv_buf + matriz.ncol;
+    float *fila_inferior = recv_buf + local.ncol;
     
     while(1){
         local_dt = 0;
@@ -255,7 +270,7 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
             RECEPCION Y ENVIO DE/A VECINOS
         */
         MPI_Neighbor_alltoallw(
-            matriz.anterior[0], 
+            local.matriz_anterior[0], 
             send_recv_count, 
             send_despl, 
             send_recv_type,
@@ -269,33 +284,33 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
         /*
             CÁLCULO DE TEMPERATURAS
         */
-        for(i = 0; i < matriz.nfil; i++){
-            for(j = 0; j < matriz.ncol; j++){
+        for(i = 0; i < local.nfil; i++){
+            for(j = 0; j < local.ncol; j++){
                 
                 if (i == 0){
-                    t.arriba = id != 0 ? matriz.anterior[i][j] - fila_superior[j] : 0;
+                    t.arriba = id != 0 ? local.matriz_anterior[i][j] - fila_superior[j] : 0;
                 } else{
-                    t.arriba = matriz.anterior[i][j] - matriz.anterior[i-1][j];
+                    t.arriba = local.matriz_anterior[i][j] - local.matriz_anterior[i-1][j];
                 } 
-                if (i == matriz.nfil - 1){
-                    t.abajo = id != nprocs - 1 ? matriz.anterior[i][j] - fila_inferior[j] : 0;
+                if (i == local.nfil - 1){
+                    t.abajo = id != nprocs - 1 ? local.matriz_anterior[i][j] - fila_inferior[j] : 0;
                 } else {
-                    t.abajo = matriz.anterior[i][j] - matriz.anterior[i+1][j];
+                    t.abajo = local.matriz_anterior[i][j] - local.matriz_anterior[i+1][j];
                 } 
 
-                t.izquierda = j > 0 ? matriz.anterior[i][j] - matriz.anterior[i][j-1] : 0;
-                t.derecha = j < matriz.ncol - 1 ? matriz.anterior[i][j] - matriz.anterior[i][j+1] : 0;                
+                t.izquierda = j > 0 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j-1] : 0;
+                t.derecha = j < local.ncol - 1 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j+1] : 0;                
                 
-                matriz.actual[i][j] = matriz.anterior[i][j]
+                local.matriz_actual[i][j] = local.matriz_anterior[i][j]
                     - R * t.arriba
                     - R * t.abajo
                     - R * t.izquierda
                     - R * t.derecha;  
 
-                if(matriz.actual[i][j] - matriz.anterior[i][j] > 0){
-                    local_dt += matriz.actual[i][j] - matriz.anterior[i][j];
+                if(local.matriz_actual[i][j] - local.matriz_anterior[i][j] > 0){
+                    local_dt += local.matriz_actual[i][j] - local.matriz_anterior[i][j];
                 } else {
-                    local_dt += matriz.anterior[i][j] - matriz.actual[i][j];
+                    local_dt += local.matriz_anterior[i][j] - local.matriz_actual[i][j];
                 }   
             }
         }
@@ -318,9 +333,9 @@ void computar(struct Matriz matriz, MPI_Comm comm1D, float *recv_buf, int id, in
         /*
             INTERCAMBIO DE PUNTEROS
         */
-        temp = matriz.actual;
-        matriz.actual = matriz.anterior;
-        matriz.anterior = temp;
+        temp = local.matriz_actual;
+        local.matriz_actual = local.matriz_anterior;
+        local.matriz_anterior = temp;
     }
 
 }
