@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <mpi.h>
-#include <omp.h> 
 
 #define R 0.1
 #define ESTACIONARIO 1e-6
@@ -12,10 +11,13 @@ struct MatrizLocal {
     unsigned int nfil, ncol;
     float **matriz_actual;
     float **matriz_anterior;
+    float *datos_actual;
+    float *datos_anterior; 
 };
 struct MatrizGlobal {
     unsigned int nfil, ncol;
     float **matriz;
+    float *datos;
 };
 struct Topologia {
     int dims[1];
@@ -33,7 +35,7 @@ struct Status {
 
 void computar(struct MatrizLocal, MPI_Comm, float *, int, int, MPI_Datatype);
 struct Status status = {0};
-short int nhilos; // número de hilos por proceso
+
 
 int main(int argc, char **argv){
     int id, nprocs, i, j;
@@ -44,18 +46,16 @@ int main(int argc, char **argv){
     struct timeval start, end;
     float *recv_buf;
     FILE *f;
-    int provided;
     
     /*
         LECTURA DE ARGUMENTOS
     */
-    if (argc < 4) {
-        printf("Error de uso: %s [nfil] [ncol] [nhilos]\n", argv[0]);
+    if (argc < 3) {
+        printf("Error de uso: %s [nfil] [ncol]\n", argv[0]);
         return 1;
     }    
     global.nfil = (unsigned int)atoi(argv[1]);
     global.ncol = (unsigned int)atoi(argv[2]);
-    nhilos = (unsigned int)atoi(argv[3]);
 
     if(global.nfil < 1 || global.ncol < 1){
         printf("Error de uso: nfil y ncol deben ser mayor que 0\n");
@@ -67,13 +67,7 @@ int main(int argc, char **argv){
     */
     gettimeofday(&start, NULL);
 
-    MPI_Init_thread(&argc, &argv, MPI_THREAD_FUNNELED, &provided);
-    if (provided < MPI_THREAD_FUNNELED) {
-        fprintf(stderr, "MPI no soporta MPI_THREAD_FUNNELED\n");
-        MPI_Abort(MPI_COMM_WORLD, 1);
-        return 1;
-    }
-    
+    MPI_Init(&argc, &argv);
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &id);
 
@@ -85,10 +79,9 @@ int main(int argc, char **argv){
             RESERVA DE MEMORIA 
         */
         global.matriz = (float **)malloc(sizeof(float *) * (global.nfil));
-        global.matriz[0] =  malloc(sizeof(float) * global.nfil * global.ncol);
-
-        for(i = 1; i < global.nfil; i++){
-            global.matriz[i] = global.matriz[i-1] + global.ncol;
+        global.datos = malloc(sizeof(float) * (global.nfil) * global.ncol);
+        for(i = 0; i < global.nfil; i++){
+            global.matriz[i] = global.datos + i * global.ncol;
         }
 
         /* 
@@ -132,15 +125,18 @@ int main(int argc, char **argv){
         RESERVA DE MEMORIA PARA MATRICES LOCALES
     */
     local.matriz_actual = (float **)malloc(sizeof(float *) * (local.nfil));
-    local.matriz_actual[0] = malloc(sizeof(float) * (local.nfil) * local.ncol);
+    local.datos_actual = malloc(sizeof(float) * (local.nfil) * local.ncol);
 
     local.matriz_anterior = (float **)malloc(sizeof(float *) * (local.nfil));
-    local.matriz_anterior[0] = malloc(sizeof(float) * (local.nfil) * local.ncol);
+    local.datos_anterior = malloc(sizeof(float) * (local.nfil) * local.ncol);
 
-    for(i = 1; i < local.nfil; i++){
-        local.matriz_actual[i] = local.matriz_actual[i-1] + local.ncol;
-        local.matriz_anterior[i] = local.matriz_anterior[i-1] + local.ncol;
+    for(i = 0; i < local.nfil; i++){
+        local.matriz_actual[i] = local.datos_actual + i * local.ncol;
+        local.matriz_anterior[i] = local.datos_anterior + i * local.ncol;
     }
+    /*
+        REGISTRAR TIEMPO DE INICIO
+    */
  
     /* 
         ENVÍO DE TAREAS 
@@ -149,11 +145,11 @@ int main(int argc, char **argv){
     MPI_Type_commit(&send_root.tipo_fila);
 
     MPI_Scatterv(
-        id == 0 ? global.matriz[0]  : NULL,
+        id == 0 ? global.datos  : NULL,
         id == 0 ? send_root.contadores_env  : NULL,
         id == 0 ? send_root.despls          : NULL,
         id == 0 ? send_root.tipo_fila       : MPI_DATATYPE_NULL,
-        local.matriz_anterior[0],
+        local.datos_anterior,
         local.nfil,
         send_root.tipo_fila,
         0,
@@ -188,10 +184,10 @@ int main(int argc, char **argv){
     */
 
     MPI_Gatherv(
-        local.matriz_actual[0],
+        local.datos_actual,
         local.nfil, 
         send_root.tipo_fila,
-        id == 0 ? global.matriz[0] : NULL,
+        id == 0 ? global.datos : NULL,
         id == 0 ? send_root.contadores_env : NULL,
         id == 0 ? send_root.despls : NULL,
         id == 0 ? send_root.tipo_fila : MPI_DATATYPE_NULL,
@@ -222,14 +218,14 @@ int main(int argc, char **argv){
     /*
         LIBERAR RECURSOS
     */  
-    free(local.matriz_actual[0]);
-    free(local.matriz_anterior[0]);
+    free(local.datos_actual);
+    free(local.datos_anterior);
     free(local.matriz_actual);
     free(local.matriz_anterior);
     free(recv_buf);
     if (id == 0){
-        free(global.matriz[0]);
         free(global.matriz);
+        free(global.datos);
     }
     /*
         ALMACENAR LOS DATOS EN UN FICHERO
@@ -257,103 +253,89 @@ void computar(struct MatrizLocal local, MPI_Comm comm1D, float *recv_buf, int id
     struct Temperatura {
         float arriba, abajo, izquierda, derecha;
     };
+    struct Temperatura t;
     float local_dt, global_dt;
+
     int send_recv_count[2] = {1, 1};     // tamaño del búfer de mensajes
     MPI_Datatype send_recv_type[2] = {tipo_fila, tipo_fila}; // tipos del búfer de mensajes
     size_t send_despl[2] = {0, sizeof(float) * local.ncol * (local.nfil - 1)};
     size_t recv_despl[2] = {0, sizeof(float) * local.ncol}; 
     float *fila_superior = recv_buf;
     float *fila_inferior = recv_buf + local.ncol;
+    
+    while(1){
+        local_dt = 0;
+        status.iteraciones_temporales++;
+        /*
+            RECEPCION Y ENVIO DE/A VECINOS
+        */
+        MPI_Neighbor_alltoallw(
+            local.matriz_anterior[0], 
+            send_recv_count, 
+            send_despl, 
+            send_recv_type,
+            recv_buf, 
+            send_recv_count, 
+            recv_despl, 
+            send_recv_type,
+            comm1D
+        );
 
-    short int terminar = 0;
-
-    #pragma omp parallel num_threads(nhilos) \
-        private(i, j) shared(terminar, local_dt)
-    {
-        struct Temperatura t;
-        while(1){
-            /*
-                RECEPCION Y ENVIO DE/A VECINOS
-            */
-            #pragma omp master 
-            {
-                MPI_Neighbor_alltoallw(
-                    local.matriz_anterior[0], 
-                    send_recv_count, 
-                    send_despl, 
-                    send_recv_type,
-                    recv_buf, 
-                    send_recv_count, 
-                    recv_despl, 
-                    send_recv_type,
-                    comm1D
-                );
-                local_dt = 0;
-                status.iteraciones_temporales++;
-            }
-            #pragma omp barrier
-
-            /*
-                CÁLCULO DE TEMPERATURAS
-            */
-            #pragma omp for reduction(+:local_dt)
-            for(i = 0; i < local.nfil; i++){
-                for(j = 0; j < local.ncol; j++){
-                    
-                    if (i == 0){
-                        t.arriba = id != 0 ? local.matriz_anterior[i][j] - fila_superior[j] : 0;
-                    } else{
-                        t.arriba = local.matriz_anterior[i][j] - local.matriz_anterior[i-1][j];
-                    } 
-                    if (i == local.nfil - 1){
-                        t.abajo = id != nprocs - 1 ? local.matriz_anterior[i][j] - fila_inferior[j] : 0;
-                    } else {
-                        t.abajo = local.matriz_anterior[i][j] - local.matriz_anterior[i+1][j];
-                    } 
-
-                    t.izquierda = j > 0 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j-1] : 0;
-                    t.derecha = j < local.ncol - 1 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j+1] : 0;                
-                    
-                    local.matriz_actual[i][j] = local.matriz_anterior[i][j]
-                        - R * t.arriba
-                        - R * t.abajo
-                        - R * t.izquierda
-                        - R * t.derecha;  
-
-                    if(local.matriz_actual[i][j] - local.matriz_anterior[i][j] > 0){
-                        local_dt += local.matriz_actual[i][j] - local.matriz_anterior[i][j];
-                    } else {
-                        local_dt += local.matriz_anterior[i][j] - local.matriz_actual[i][j];
-                    }   
-                }
-            }
-
-                /*
-                    ENVÍO DE DIFERENCIAL DE TEMPERATURA
-                */
-            #pragma omp master 
-            {
-                MPI_Allreduce(
-                    &local_dt, 
-                    &global_dt, 
-                    1, 
-                    MPI_FLOAT, 
-                    MPI_SUM, 
-                    MPI_COMM_WORLD
-                ); // también funciona como barrera de sincronización
+        /*
+            CÁLCULO DE TEMPERATURAS
+        */
+        for(i = 0; i < local.nfil; i++){
+            for(j = 0; j < local.ncol; j++){
                 
-                if (global_dt < ESTACIONARIO){
-                    terminar = 1;
-                }
-                /*
-                INTERCAMBIO DE PUNTEROS
-                */
-                temp = local.matriz_actual;
-                local.matriz_actual = local.matriz_anterior;
-                local.matriz_anterior = temp;
+                if (i == 0){
+                    t.arriba = id != 0 ? local.matriz_anterior[i][j] - fila_superior[j] : 0;
+                } else{
+                    t.arriba = local.matriz_anterior[i][j] - local.matriz_anterior[i-1][j];
+                } 
+                if (i == local.nfil - 1){
+                    t.abajo = id != nprocs - 1 ? local.matriz_anterior[i][j] - fila_inferior[j] : 0;
+                } else {
+                    t.abajo = local.matriz_anterior[i][j] - local.matriz_anterior[i+1][j];
+                } 
+
+                t.izquierda = j > 0 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j-1] : 0;
+                t.derecha = j < local.ncol - 1 ? local.matriz_anterior[i][j] - local.matriz_anterior[i][j+1] : 0;                
+                
+                local.matriz_actual[i][j] = local.matriz_anterior[i][j]
+                    - R * t.arriba
+                    - R * t.abajo
+                    - R * t.izquierda
+                    - R * t.derecha;  
+
+                if(local.matriz_actual[i][j] - local.matriz_anterior[i][j] > 0){
+                    local_dt += local.matriz_actual[i][j] - local.matriz_anterior[i][j];
+                } else {
+                    local_dt += local.matriz_anterior[i][j] - local.matriz_actual[i][j];
+                }   
             }
-            #pragma omp barrier 
-            if (terminar) break;
         }
+
+        /*
+            ENVÍO DE DIFERENCIAL DE TEMPERATURA
+        */
+        MPI_Allreduce(
+            &local_dt, 
+            &global_dt, 
+            1, 
+            MPI_FLOAT, 
+            MPI_SUM, 
+            MPI_COMM_WORLD
+        ); // también funciona como barrera de sincronización
+        
+        if (global_dt < ESTACIONARIO){
+            return;
+        } 
+        /*
+            INTERCAMBIO DE PUNTEROS
+        */
+        temp = local.matriz_actual;
+        local.matriz_actual = local.matriz_anterior;
+        local.matriz_anterior = temp;
     }
+
 }
