@@ -1,0 +1,1 @@
+Este repositorio contiene una serie de prácticas realizadas en la asignatura "Computación de altas prestaciones", del Máster Universitario de Ingeniería Informática. En cada tarea se explora un enfoque diferente para solucionar un problema físico empleando programación paralela, acompañando el código de un informe técnico.
